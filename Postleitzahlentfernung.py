@@ -157,7 +157,9 @@ def datensaetze_im_umkreis(
                 return 0.2
             else:
                 return 0.0
-
+        #labels = ["1.0","0.8","0.6","0.4","0.2","0.0"]
+        #bins = [0,5,20,40,60,80,2000]
+        #result["Entfernungsscore"] = pd.cut(result["Entfernung_km"], right=true,labels = labels, bins=bins)
         result["Entfernungsscore"] = result["Entfernung_km"].apply(score_aus_entfernung)
 
     return result
