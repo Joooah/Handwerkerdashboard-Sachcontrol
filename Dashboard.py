@@ -20,10 +20,6 @@ AUFTRAGSDATEN_PATH = "/Users/benab/Desktop/Projekt/Auftragsdaten.parquet"  # ggf
 
 @st.cache_data
 def get_geo_strukturen():
-    """
-    Lädt die Handwerker-/PLZ-Geodaten und den BallTree
-    aus Postleitzahlentfernung.build_auftrag_geo.
-    """
     auftrag_geo, plz_coords, tree = build_auftrag_geo_from_df(AUFTRAGSDATEN_PATH)
     return auftrag_geo, plz_coords, tree
 
