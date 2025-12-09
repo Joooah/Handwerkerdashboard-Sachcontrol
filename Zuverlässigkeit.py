@@ -1,15 +1,33 @@
 import pandas as pd
 import numpy as np
-df = pd.read_parquet('/Users/benab/Desktop/Projekt/Auftragsdaten.parquet')
-dfz = pd.DataFrame()
-dfz["Einigung"] = df["Einigung_Netto"]
-dfz["HWNAME"] = df["Handwerker_Name"]
-dfz["Forderung"] = df["Forderung_Netto"]
 
-dfz["Verhältnis"]=dfz["Einigung"].div(dfz["Forderung"]).clip(upper=1)
+def berechne_zuverlaessigkeit(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["Handwerker_Name", "Einigung_Netto", "Forderung_Netto"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Für die Zuverlässigkeit fehlen Spalten: {missing}. "
+            f"Aktuelle Spalten: {list(df.columns)}"
+        )
 
-dfz["Verhältnis"] = dfz["Verhältnis"].replace([np.inf, -np.inf], 1)
-dfz.loc[dfz["Forderung"] == 0, "Verhältnis"] = 1
-result = dfz[dfz["Verhältnis"] >= 0]
-result= result.groupby("HWNAME").agg({"Verhältnis":"mean"})
-print(result.min())
+    dfz = df[required].copy()
+
+    dfz.rename(
+        columns={
+            "Einigung_Netto": "Einigung",
+            "Forderung_Netto": "Forderung",
+        },
+        inplace=True,
+    )
+
+    dfz["Verhaeltnis"] = dfz["Einigung"].div(dfz["Forderung"]).clip(upper=1)
+    dfz["Verhaeltnis"] = dfz["Verhaeltnis"].replace([np.inf, -np.inf], 1)
+    dfz.loc[dfz["Forderung"] == 0, "Verhaeltnis"] = 1
+
+    result = (
+        dfz.groupby("Handwerker_Name", as_index=False)["Verhaeltnis"]
+        .mean()
+        .rename(columns={"Verhaeltnis": "Zuverlaessigkeit_Score"})
+    )
+
+    return result

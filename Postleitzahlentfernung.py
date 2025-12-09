@@ -49,13 +49,13 @@ def build_plz_koordinaten() -> pd.DataFrame:
             "longitude",
         ]]
 
-        df_country = df_country.rename(columns={"postal_code": "PLZ_HW"})
+        df_country = df_country.rename(columns={"postal_code": "PLZ_HW","country_code": "Land"})
 
         # Gültige & eindeutige Koordinaten
         df_country = (
             df_country
             .dropna(subset=["latitude", "longitude"])
-            .drop_duplicates(subset="PLZ_HW", keep="first")
+            .drop_duplicates(subset=["Land","PLZ_HW"], keep="first")
         )
 
         frames.append(df_country)
@@ -65,11 +65,13 @@ def build_plz_koordinaten() -> pd.DataFrame:
 
 
 @st.cache_data
-def build_auftrag_geo(parquet_path: str) -> tuple[pd.DataFrame, pd.DataFrame, BallTree]:
-    # Auftragsdaten
-    df = load_auftrag_data(parquet_path)
-
-    # PLZ/Koordinaten
+def build_auftrag_geo_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, BallTree]:
+    """
+    Baut die Geo-Struktur nur aus dem bereits gefilterten DF (z.B. kleiner Datei)
+    statt aus der großen Auftragsdatei.
+    Erwartet Spalten: Handwerker_Name, PLZ_HW
+    """
+    # PLZ/Koordinaten für DACH
     df_dach = build_plz_koordinaten()
 
     # Pro Handwerker eine PLZ
@@ -85,13 +87,13 @@ def build_auftrag_geo(parquet_path: str) -> tuple[pd.DataFrame, pd.DataFrame, Ba
         how="left"
     )
 
-    # PLZ-Koordinatentabelle für BallTree
+    # PLZ-Koordinatentabelle für BallTree (alle PLZ in DACH)
     plz_coords = (
-        df_dach[["PLZ_HW", "latitude", "longitude"]]
+        df_dach[["Land", "PLZ_HW",  "latitude", "longitude"]]
         .dropna()
-        .drop_duplicates(subset="PLZ_HW")
+        .drop_duplicates(subset=["Land", "PLZ_HW"])
         .rename(columns={"latitude": "lat", "longitude": "lon"})
-        .set_index("PLZ_HW")
+        .set_index(["Land", "PLZ_HW"])
     )
 
     # BallTree aufbauen
@@ -99,6 +101,7 @@ def build_auftrag_geo(parquet_path: str) -> tuple[pd.DataFrame, pd.DataFrame, Ba
     tree = BallTree(coords_rad, metric="haversine")
 
     return auftrag_geo, plz_coords, tree
+
 
 
 # --------------------------------------------------------
@@ -136,12 +139,16 @@ def datensaetze_im_umkreis(
 
     # Nachbarn im Umkreis via BallTree
     idx = tree.query_radius(coord0, r=radius)[0]
+    nearby = plz_coords.iloc[idx].reset_index()
+    # Kombinationen (Land, PLZ), die im Umkreis liegen
+    nearby_pairs = nearby[["Land", "PLZ_HW"]].drop_duplicates()
 
-    # PLZ, die im Umkreis liegen
-    nearby_plz = plz_coords.iloc[idx].index.tolist()
-
-    # Handwerker im Umkreis
-    result = auftrag_geo[auftrag_geo["PLZ_HW"].isin(nearby_plz)].copy()
+    # ✅ Handwerker, deren (Land, PLZ) im Umkreis liegen
+    result = auftrag_geo.merge(
+        nearby_pairs,
+        on=["Land", "PLZ_HW"],
+        how="inner",
+    )
 
     # Optional: Distanz zur Eingabe-PLZ mit ausrechnen
     # (haversine Distanz für jede PLZ)
@@ -168,76 +175,6 @@ def datensaetze_im_umkreis(
             else:
                 return 0.0
 
-        result["Score"] = result["Entfernung_km"].apply(score_aus_entfernung)
-
-
-
-
+        result["Entfernungsscore"] = result["Entfernung_km"].apply(score_aus_entfernung)
 
     return result
-
-
-# --------------------------------------------------------
-#  STREAMLIT UI
-# --------------------------------------------------------
-
-def main():
-    st.title("Handwerker-Suche im Umkreis per PLZ")
-
-    st.markdown(
-        "Gib eine **PLZ**, einen **Radius (km)** und ein **Land** ein, "
-        "um Handwerker im Umkreis zu finden."
-    )
-
-    # Pfad zur Parquet-Datei (bei dir anpassen!)
-    parquet_path = "/Users/benab/Desktop/Projekt/Auftragsdaten.parquet"
-
-    with st.sidebar:
-        st.header("Einstellungen")
-        input_plz = st.text_input("PLZ", value="80331")
-        radius_km = st.number_input("Radius (km)", min_value=1.0, max_value=200.0, value=20.0, step=1.0)
-        country = st.selectbox("Land", options=["DE", "AT", "CH"], index=0)
-
-        run_button = st.button("Suche starten")
-
-    # Daten vorbereiten (einmalig, dank Cache)
-    with st.spinner("Lade Daten und baue Geodaten auf..."):
-        auftrag_geo, plz_coords, tree = build_auftrag_geo(parquet_path)
-
-    if run_button:
-        try:
-            result = datensaetze_im_umkreis(
-                input_plz=input_plz.strip(),
-                radius_km=radius_km,
-                country=country,
-                auftrag_geo=auftrag_geo,
-                plz_coords=plz_coords,
-                tree=tree,
-            )
-
-            if result.empty:
-                st.warning("Keine Handwerker im angegebenen Radius gefunden.")
-            else:
-                st.success(f"{len(result)} Handwerker im Umkreis gefunden.")
-                st.dataframe(
-                    result[
-                        [
-                            "Handwerker_Name",
-                            "PLZ_HW",
-                            "country_code",
-                            "latitude",
-                            "longitude",
-                            "Entfernung_km",
-                            "Score"
-                        ]
-                    ],
-                    use_container_width=True,
-                )
-        except ValueError as e:
-            st.error(str(e))
-        except Exception as e:
-            st.error(f"Fehler bei der Berechnung: {e}")
-
-
-if __name__ == "__main__":
-    main()
