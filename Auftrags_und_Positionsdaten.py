@@ -5,10 +5,6 @@ import pandas as pd
 from Postleitzahlentfernung import build_plz_koordinaten
 from data_loader import load_Auftragsdaten, load_Positionsdaten
 
-
-# --------------------------------------------
-# Ordnerstruktur
-# --------------------------------------------
 BASIS_ORDNER = "/Users/benab/Desktop/Projekt"
 
 ORDNER_SCHADENSFALL = os.path.join(
@@ -18,17 +14,12 @@ ORDNER_FALLTYP = os.path.join(
     BASIS_ORDNER, "Auftrags_und_Positionsdaten_Falltypen"
 )
 
-
 def make_safe(value: object) -> str:
     """Erlaubt fast alle Zeichen, ersetzt nur Dateisystem-Problemzeichen."""
     s = str(value)
     s = re.sub(r'[\/\\\?\*\:\|\<\>"]', "_", s)
     return s.strip()
 
-
-# --------------------------------------------
-# GEO-Funktion
-# --------------------------------------------
 def add_geo_to_rows(df: pd.DataFrame) -> pd.DataFrame:
     if "PLZ_HW" not in df.columns:
         raise KeyError("Spalte 'PLZ_HW' fehlt.")
@@ -47,9 +38,6 @@ def add_geo_to_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df_geo
 
 
-# --------------------------------------------
-# Generieren der Parquet-Dateien
-# --------------------------------------------
 def generate_parquet_files() -> None:
     """Erzeugt Dateien in zwei Ordnern:
     - ORDNER_SCHADENSFALL: <Schadenart>.parquet
@@ -69,7 +57,6 @@ def generate_parquet_files() -> None:
 
     df_pos_clean = df_pos.drop(columns=common_cols)
 
-    
     merged = pd.merge(df_auftrag, df_pos_clean, on="KvaRechnung_ID", how="left")
     merged = add_geo_to_rows(merged)
 
@@ -77,13 +64,13 @@ def generate_parquet_files() -> None:
     if "Schadenart_Name" not in merged or "Falltyp_Name" not in merged:
         raise KeyError("Schadenart_Name oder Falltyp_Name fehlt.")
 
-    # 1) Nur Schadenarten
+    #Nur Schadenarten
     for schadenart, grp in merged.groupby("Schadenart_Name"):
         safe_s = make_safe(schadenart)
         pfad = os.path.join(ORDNER_SCHADENSFALL, f"{safe_s}.parquet")
         grp.to_parquet(pfad, index=False)
 
-    # 2) Schadenart + Falltyp
+    #Schadenart + Falltyp
     for (schadenart, falltyp), grp in merged.groupby(
         ["Schadenart_Name", "Falltyp_Name"]
     ):
@@ -95,9 +82,6 @@ def generate_parquet_files() -> None:
         grp.to_parquet(pfad, index=False)
 
 
-# --------------------------------------------
-# Laden von Dateien
-# --------------------------------------------
 def lade_subset_auftragsdaten(schadenart: str, falltyp: str | None = None):
     safe_s = make_safe(schadenart)
 
@@ -111,7 +95,7 @@ def lade_subset_auftragsdaten(schadenart: str, falltyp: str | None = None):
 
     df = pd.read_parquet(pfad)
 
-    # Nur die Spalten, die wir wirklich brauchen
+    # reduz der spalten
     relevante_spalten = [
         "Handwerker_Name",
         "PLZ_HW",
@@ -125,9 +109,6 @@ def lade_subset_auftragsdaten(schadenart: str, falltyp: str | None = None):
 
     return df[vorhandene].copy()
 
-# --------------------------------------------
-# Schadenart- und Falltyp-Listen
-# --------------------------------------------
 def list_schadensarten():
     """Liest alle <Schadenart>.parquet aus ORDNER_SCHADENSFALL"""
     if not os.path.isdir(ORDNER_SCHADENSFALL):
@@ -158,4 +139,5 @@ def list_falltypen_for_schadensart(schadenart: str):
 if __name__ == "__main__":
     print("Erzeuge Parquet-Dateien…")
     generate_parquet_files()
+
     print("Fertig.")
