@@ -3,7 +3,6 @@ import pandas as pd
 
 from Zuverlässigkeit import berechne_zuverlaessigkeit
 
-
 from Auftrags_und_Positionsdaten import (
     list_schadensarten,
     list_falltypen_for_schadensart,
@@ -37,13 +36,9 @@ def main():
         "Alle Daten stammen aus vorgesplitteten Parquet-Dateien."
     )
 
-    # ---------------------------------------------------------
-    # Layout: 4 Spalten
-    # ---------------------------------------------------------
-
     col1, col2, col3, col4 = st.columns(4)
 
-    # 🔹 UMKREISAUSWAHL (neu) in Spalte 1
+    #Umkreisauswahl (neue v) in Spalte 1
     with col1:
         use_umkreis = st.checkbox("Umkreissuche", value=False)
         radius_km = st.number_input(
@@ -54,7 +49,7 @@ def main():
             step=5.0,
             disabled=not use_umkreis,
         )
-    # PLZ (wie bisher)
+    #PLZ spalte 2
     with col2:
         plz_input = st.text_input(
             "PLZ",
@@ -68,7 +63,7 @@ def main():
         label_visibility="visible",
     )
 
-    # SCHADENSART
+    #Schadensart
     schadensarten = list_schadensarten()
     schadensarten = [""] + schadensarten  # leere Auswahl
 
@@ -80,7 +75,7 @@ def main():
             format_func=lambda x: "Schadenart auswählen" if x == "" else x,
         )
 
-    # FALLTYP
+    # Falltypen
     if schadensart_input:
         falltypen = list_falltypen_for_schadensart(schadensart_input)
     else:
@@ -98,15 +93,13 @@ def main():
 
     st.markdown("---")
 
-    # ---------------------------------------------------------
-    # Button: Daten laden
-    # ---------------------------------------------------------
+    #Suchen button maybe noch rausnehmen?
     if st.button("Suchen"):
         if schadensart_input == "":
             st.warning("Bitte zuerst eine Schadenart wählen.")
             return
 
-        # 1) Daten laden (kleine Datei je nach Schadenart/Falltyp)
+        #Daten laden (kleine Datei je nach Schadenart/Falltyp)
         try:
             df_raw = lade_subset_auftragsdaten(schadensart_input, falltyp_input)
         except FileNotFoundError:
@@ -117,18 +110,20 @@ def main():
             st.warning("Keine Daten für diese Auswahl vorhanden.")
             return
 
-        # 2) Basis-Dashboard: 1 Zeile je Handwerker + PLZ
+        #Basis-Dashboard: 1 Zeile je Handwerker + PLZ
         dashboard = (
             df_raw[["Handwerker_Name", "PLZ_HW"]]
             .drop_duplicates()
             .reset_index(drop=True)
         )
 
-        # 3) Zuverlässigkeitsscore berechnen und anhängen
+        #Zuverlässigkeitsscore berechnen und anhängen
+        #ergänzung der berechnung muss noch
         df_zuv = berechne_zuverlaessigkeit(df_raw)
         dashboard = dashboard.merge(df_zuv, on="Handwerker_Name", how="left")
         
-        # 4) Umkreissuche oder einfache PLZ-Filterung
+        #Umkreissuche oder einfache PLZ-Filterung
+        #einfache PLZ Filterung maybe durch einfache Liste ersetzen
         if use_umkreis:
             if not plz_input:
                 st.warning("Bitte für die Umkreissuche eine PLZ eingeben.")
@@ -151,12 +146,12 @@ def main():
                 st.warning("Keine Handwerker im gewünschten Umkreis gefunden.")
                 return
 
-            # Entfernungen/Score ins Dashboard mergen
+            #Entfernungen/Score ins Dashboard mergen
             geo_small = geo_result[["Handwerker_Name", "Entfernung_km", "Entfernungsscore"]]
             dashboard = dashboard.merge(geo_small, on="Handwerker_Name", how="inner")
 
         else:
-            # klassische PLZ-Filterung (optional)
+            #klassische PLZ-Filterung (optional)
             if plz_input:
                 dashboard = dashboard[
                     dashboard["PLZ_HW"].astype(str).str.startswith(plz_input.strip())
@@ -168,7 +163,7 @@ def main():
 
         dashboard["Gesamtscore"] = 0.5* dashboard["Entfernungsscore"]+0.5* dashboard["Zuverlaessigkeit_Score"]
         dashboard = dashboard.sort_values(by="Gesamtscore", ascending=False)
-        # 5) Anzeige
+        #Anzeigen lassen
         st.subheader("Handwerkervorschläge")
 
         shown_cols = [
