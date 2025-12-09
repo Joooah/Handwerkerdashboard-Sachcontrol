@@ -5,26 +5,21 @@ from sklearn.neighbors import BallTree
 import streamlit as st
 from sklearn.metrics.pairwise import haversine_distances
 
-
-# --------------------------------------------------------
-#  Daten laden & vorbereiten (mit Caching, damit es schnell bleibt)
-# --------------------------------------------------------
-
 @st.cache_data
 def load_auftrag_data(parquet_path: str) -> pd.DataFrame:
     df = pd.read_parquet('/Users/benab/Desktop/Projekt/Auftragsdaten.parquet')
 
-    # "-" als fehlende PLZ behandeln
+    #"-" als fehlende PLZ behandeln
     df["PLZ_HW"] = df["PLZ_HW"].replace("-", np.nan)
 
-    # Fehlende PLZ_HW mit PLZ_SO auffüllen (falls vorhanden)
+    #Fehlende PLZ_HW mit PLZ_SO auffüllen (falls vorhanden)
     if "PLZ_SO" in df.columns:
         df = df.fillna({"PLZ_HW": df["PLZ_SO"]})
 
-    # Zeilen ohne PLZ entfernen
+    #Zeilen ohne PLZ entfernen
     df = df.dropna(subset=["PLZ_HW"])
 
-    # PLZ als String
+    #PLZ als String
     df["PLZ_HW"] = df["PLZ_HW"].astype(str)
 
     return df
@@ -71,23 +66,23 @@ def build_auftrag_geo_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
     statt aus der großen Auftragsdatei.
     Erwartet Spalten: Handwerker_Name, PLZ_HW
     """
-    # PLZ/Koordinaten für DACH
+    #PLZ/Koordinaten für DACH
     df_dach = build_plz_koordinaten()
 
-    # Pro Handwerker eine PLZ
+    #Pro Handwerker nur eine PLZ
     auftrag = (
         df.groupby("Handwerker_Name", as_index=False)
           .agg({"PLZ_HW": "first"})
     )
 
-    # Geo-Infos dazu
+    #eo-Infos dazu
     auftrag_geo = auftrag.merge(
         df_dach,
         on="PLZ_HW",
         how="left"
     )
 
-    # PLZ-Koordinatentabelle für BallTree (alle PLZ in DACH)
+    #PLZ-Koordinatentabelle für BallTree (alle PLZ in DACH)
     plz_coords = (
         df_dach[["Land", "PLZ_HW",  "latitude", "longitude"]]
         .dropna()
@@ -96,17 +91,11 @@ def build_auftrag_geo_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
         .set_index(["Land", "PLZ_HW"])
     )
 
-    # BallTree aufbauen
+    #BallTree aufbauen
     coords_rad = np.radians(plz_coords[["lat", "lon"]].to_numpy())
     tree = BallTree(coords_rad, metric="haversine")
 
     return auftrag_geo, plz_coords, tree
-
-
-
-# --------------------------------------------------------
-#  Funktion: Datensätze im Umkreis finden
-# --------------------------------------------------------
 
 def datensaetze_im_umkreis(
     input_plz: str,
@@ -116,13 +105,7 @@ def datensaetze_im_umkreis(
     plz_coords: pd.DataFrame,
     tree: BallTree,
 ) -> pd.DataFrame:
-    """
-    input_plz : eingegebene PLZ (z.B. "80331")
-    radius_km : Suchradius in km
-    country   : "DE", "AT", "CH", ...
-    """
-
-    # Koordinaten der Eingabe-PLZ über pgeocode holen
+    #Koordinaten der Eingabe-PLZ über pgeocode holen
     nomi = pgeocode.Nominatim(country)
     info = nomi.query_postal_code(input_plz)
 
@@ -131,27 +114,27 @@ def datensaetze_im_umkreis(
 
     lat0, lon0 = info.latitude, info.longitude
 
-    # Koordinate in Radianten
+    #Koordinate in Radianten
     coord0 = np.radians([[lat0, lon0]])
 
-    # Radius in Radiant (Erdradius ≈ 6371 km)
+    #Radius in Radiant (Erdradius ca. 6371 km)
     radius = radius_km / 6371.0
 
-    # Nachbarn im Umkreis via BallTree
+    #Nachbarn im Umkreis via BallTree
     idx = tree.query_radius(coord0, r=radius)[0]
     nearby = plz_coords.iloc[idx].reset_index()
-    # Kombinationen (Land, PLZ), die im Umkreis liegen
+    #Kombinationen (Land, PLZ), die im Umkreis liegen
     nearby_pairs = nearby[["Land", "PLZ_HW"]].drop_duplicates()
 
-    # ✅ Handwerker, deren (Land, PLZ) im Umkreis liegen
+    #Handwerker, deren (Land, PLZ) im Umkreis liegen
     result = auftrag_geo.merge(
         nearby_pairs,
         on=["Land", "PLZ_HW"],
         how="inner",
     )
 
-    # Optional: Distanz zur Eingabe-PLZ mit ausrechnen
-    # (haversine Distanz für jede PLZ)
+    #Optional: Distanz zur Eingabe-PLZ mit ausrechnen
+    #(haversine Distanz für jede PLZ)
     if not result.empty:
         coords_target = np.radians(result[["latitude", "longitude"]].to_numpy())
         coord0_rad = coord0  # das ist ja schon np.radians([[lat0, lon0]])
