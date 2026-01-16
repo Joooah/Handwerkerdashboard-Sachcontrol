@@ -111,7 +111,7 @@ def main():
     default_w = 0.5
 
     with w1:
-        w_entf = st.slider(
+        w_entf = st.number_input(
             "Entfernung",
             min_value=0.0,
             max_value=1.0,
@@ -120,7 +120,7 @@ def main():
             key="weight_Entfernungsscore",
         )
     with w2:
-        w_zuv = st.slider(
+        w_zuv = st.number_input(
             "Zuverlässigkeit",
             min_value=0.0,
             max_value=1.0,
@@ -184,13 +184,14 @@ def main():
                 st.warning("Keine Handwerker im gewünschten Umkreis gefunden.")
                 return
 
-            geo_small = geo_result[["Handwerker_Name", "Entfernung_km", "Entfernungsscore"]]
-            dashboard = dashboard.merge(geo_small, on="Handwerker_Name", how="inner")
+            geo_small = geo_result[["Handwerker_Name", "Land", "PLZ_HW", "Entfernung_km", "Entfernungsscore"]]
+            dashboard = dashboard.merge(geo_small, on=["Handwerker_Name", "Land", "PLZ_HW"], how="inner")
             dashboard["Entfernungsscore"] = pd.to_numeric(dashboard["Entfernungsscore"], errors="coerce")
             dashboard["Entfernung_km"] = pd.to_numeric(dashboard["Entfernung_km"], errors="coerce")
 
         else:
             # PLZ-Prefix Filter (wie original)
+            dashboard = dashboard[dashboard["Land"] == country]
             dashboard = dashboard[dashboard["PLZ_HW"].astype(str).str.startswith(plz_input.strip())]
             # Stabil: Distanz-Spalten existieren trotzdem
             dashboard["Entfernung_km"] = pd.NA

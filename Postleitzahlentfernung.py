@@ -16,7 +16,11 @@ def build_plz_koordinaten() -> pd.DataFrame:
         df_country = nomi._data.copy()
 
         df_country["country_code"] = c
-        df_country["postal_code"] = df_country["postal_code"].astype(str)
+        df_country["postal_code"] = df_country["postal_code"].astype(str).str.strip()
+        if c == "DE":
+            df_country["postal_code"] = df_country["postal_code"].str.zfill(5)
+        else:  # AT/CH
+            df_country["postal_code"] = df_country["postal_code"].str.zfill(4)
 
         df_country = df_country[["country_code","postal_code","latitude","longitude",]]
 
@@ -30,9 +34,12 @@ def build_plz_koordinaten() -> pd.DataFrame:
     return df_dach
 
 
-@st.cache_data
+@st.cache_resource
 def build_auftrag_geo_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, BallTree]:
-    df = load_Auftragsdaten()
+    df = df.copy()
+    df["Land"] = df["Land"].astype(str).str.strip().str.upper()
+
+    df["PLZ_HW"] = df.apply(lambda r: str(r["PLZ_HW"]).strip().zfill(5) if r["Land"] == "DE" else str(r["PLZ_HW"]).strip().zfill(4), axis=1)
     df_dach = build_plz_koordinaten()
 
     auftrag = (df.groupby("Handwerker_Name", as_index=False).agg({"Land": "first", "PLZ_HW": "first"}))
@@ -78,6 +85,7 @@ def datensaetze_im_umkreis(input_plz: str, radius_km: float, country: str, auftr
         dists_km = dists_rad * 6371.0
         result = result.copy()
         result["Entfernung_km"] = dists_km
+        
         result = result.sort_values("Entfernung_km")
         
         labels = ["1.0","0.8","0.6","0.4","0.2","0.0"]
