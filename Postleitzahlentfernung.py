@@ -4,26 +4,7 @@ import pgeocode
 from sklearn.neighbors import BallTree
 import streamlit as st
 from sklearn.metrics.pairwise import haversine_distances
-
-@st.cache_data
-def load_auftrag_data(parquet_path: str) -> pd.DataFrame:
-    df = pd.read_parquet('/Users/benab/Desktop/Projekt/Auftragsdaten.parquet')
-
-    #"-" als fehlende PLZ behandeln
-    df["PLZ_HW"] = df["PLZ_HW"].replace("-", np.nan)
-
-    #Fehlende PLZ_HW mit PLZ_SO auffüllen (falls vorhanden)
-    if "PLZ_SO" in df.columns:
-        df = df.fillna({"PLZ_HW": df["PLZ_SO"]})
-
-    #Zeilen ohne PLZ entfernen
-    df = df.dropna(subset=["PLZ_HW"])
-
-    #PLZ als String
-    df["PLZ_HW"] = df["PLZ_HW"].astype(str)
-
-    return df
-
+from data_loader import load_Auftragsdaten
 
 @st.cache_data
 def build_plz_koordinaten() -> pd.DataFrame:
@@ -37,21 +18,11 @@ def build_plz_koordinaten() -> pd.DataFrame:
         df_country["country_code"] = c
         df_country["postal_code"] = df_country["postal_code"].astype(str)
 
-        df_country = df_country[[
-            "country_code",
-            "postal_code",
-            "latitude",
-            "longitude",
-        ]]
+        df_country = df_country[["country_code","postal_code","latitude","longitude",]]
 
         df_country = df_country.rename(columns={"postal_code": "PLZ_HW","country_code": "Land"})
-
-        # Gültige & eindeutige Koordinaten
-        df_country = (
-            df_country
-            .dropna(subset=["latitude", "longitude"])
-            .drop_duplicates(subset=["Land","PLZ_HW"], keep="first")
-        )
+        
+        df_country = (df_country.dropna(subset=["latitude", "longitude"]).drop_duplicates(subset=["Land","PLZ_HW"], keep="first"))
 
         frames.append(df_country)
 
@@ -61,51 +32,27 @@ def build_plz_koordinaten() -> pd.DataFrame:
 
 @st.cache_data
 def build_auftrag_geo_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, BallTree]:
-    """
-    Baut die Geo-Struktur nur aus dem bereits gefilterten DF (z.B. kleiner Datei)
-    statt aus der großen Auftragsdatei.
-    Erwartet Spalten: Handwerker_Name, PLZ_HW
-    """
-    #PLZ/Koordinaten für DACH
+    df = load_Auftragsdaten()
     df_dach = build_plz_koordinaten()
 
-    #Pro Handwerker nur eine PLZ
-    auftrag = (
-        df.groupby("Handwerker_Name", as_index=False)
-          .agg({"PLZ_HW": "first"})
-    )
+    auftrag = (df.groupby("Handwerker_Name", as_index=False).agg({"Land": "first", "PLZ_HW": "first"}))
+    auftrag_geo = auftrag.merge(df_dach, on=["Land", "PLZ_HW"], how="left")
 
-    #eo-Infos dazu
-    auftrag_geo = auftrag.merge(
-        df_dach,
-        on="PLZ_HW",
-        how="left"
-    )
+    plz_coords = (df_dach[["Land", "PLZ_HW",  "latitude", "longitude"]].dropna().drop_duplicates(subset=["Land", "PLZ_HW"]).rename(columns={"latitude": "lat", "longitude": "lon"}).set_index(["Land", "PLZ_HW"]))
 
-    #PLZ-Koordinatentabelle für BallTree (alle PLZ in DACH)
-    plz_coords = (
-        df_dach[["Land", "PLZ_HW",  "latitude", "longitude"]]
-        .dropna()
-        .drop_duplicates(subset=["Land", "PLZ_HW"])
-        .rename(columns={"latitude": "lat", "longitude": "lon"})
-        .set_index(["Land", "PLZ_HW"])
-    )
-
-    #BallTree aufbauen
     coords_rad = np.radians(plz_coords[["lat", "lon"]].to_numpy())
     tree = BallTree(coords_rad, metric="haversine")
 
     return auftrag_geo, plz_coords, tree
 
-def datensaetze_im_umkreis(
-    input_plz: str,
-    radius_km: float,
-    country: str,
-    auftrag_geo: pd.DataFrame,
-    plz_coords: pd.DataFrame,
-    tree: BallTree,
-) -> pd.DataFrame:
-    #Koordinaten der Eingabe-PLZ über pgeocode holen
+@st.cache_resource
+def get_geo_strukturen():
+    df = load_Auftragsdaten()
+
+    return build_auftrag_geo_from_df(df)
+
+def datensaetze_im_umkreis(input_plz: str, radius_km: float, country: str, auftrag_geo: pd.DataFrame, plz_coords: pd.DataFrame,tree: BallTree,) -> pd.DataFrame:
+
     nomi = pgeocode.Nominatim(country)
     info = nomi.query_postal_code(input_plz)
 
@@ -114,27 +61,15 @@ def datensaetze_im_umkreis(
 
     lat0, lon0 = info.latitude, info.longitude
 
-    #Koordinate in Radianten
     coord0 = np.radians([[lat0, lon0]])
-
-    #Radius in Radiant (Erdradius ca. 6371 km)
     radius = radius_km / 6371.0
 
-    #Nachbarn im Umkreis via BallTree
     idx = tree.query_radius(coord0, r=radius)[0]
     nearby = plz_coords.iloc[idx].reset_index()
-    #Kombinationen (Land, PLZ), die im Umkreis liegen
     nearby_pairs = nearby[["Land", "PLZ_HW"]].drop_duplicates()
 
-    #Handwerker, deren (Land, PLZ) im Umkreis liegen
-    result = auftrag_geo.merge(
-        nearby_pairs,
-        on=["Land", "PLZ_HW"],
-        how="inner",
-    )
+    result = auftrag_geo.merge(nearby_pairs, on=["Land", "PLZ_HW"], how="inner")
 
-    #Optional: Distanz zur Eingabe-PLZ mit ausrechnen
-    #(haversine Distanz für jede PLZ)
     if not result.empty:
         coords_target = np.radians(result[["latitude", "longitude"]].to_numpy())
         coord0_rad = coord0  # das ist ja schon np.radians([[lat0, lon0]])
@@ -144,22 +79,10 @@ def datensaetze_im_umkreis(
         result = result.copy()
         result["Entfernung_km"] = dists_km
         result = result.sort_values("Entfernung_km")
-        def score_aus_entfernung(dist_km):
-            if dist_km <= 5:
-                return 1.0
-            elif dist_km <= 20:
-                return 0.8
-            elif dist_km <= 40:
-                return 0.6
-            elif dist_km <= 60:
-                return 0.4
-            elif dist_km <= 80:
-                return 0.2
-            else:
-                return 0.0
-        #labels = ["1.0","0.8","0.6","0.4","0.2","0.0"]
-        #bins = [0,5,20,40,60,80,2000]
-        #result["Entfernungsscore"] = pd.cut(result["Entfernung_km"], right=true,labels = labels, bins=bins)
-        result["Entfernungsscore"] = result["Entfernung_km"].apply(score_aus_entfernung)
+        
+        labels = ["1.0","0.8","0.6","0.4","0.2","0.0"]
+        bins = [0,5,20,40,60,80,1001]
+        result["Entfernungsscore"] = pd.cut(result["Entfernung_km"], right=True,labels = labels, bins=bins, include_lowest=True)
+
 
     return result

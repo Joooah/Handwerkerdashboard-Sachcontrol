@@ -1,134 +1,176 @@
 import streamlit as st
 import pandas as pd
-
 from Zuverlässigkeit import berechne_zuverlaessigkeit
-
 from Auftrags_und_Positionsdaten import (
     list_schadensarten,
     list_falltypen_for_schadensart,
-    lade_subset_auftragsdaten
+    lade_subset_auftragsdaten,
+    list_gewerke,
+    lade_subset_auftragsdaten_gewerk,
 )
-from Postleitzahlentfernung import (
-    build_auftrag_geo_from_df,
-    datensaetze_im_umkreis,
-)
+from Postleitzahlentfernung import datensaetze_im_umkreis, get_geo_strukturen
+import urllib.parse
+
+AUFTRAGSDATEN_PATH = "/Users/benab/Desktop/Projekt/Auftragsdaten.parquet"
 
 st.set_page_config(layout="wide")
 
-AUFTRAGSDATEN_PATH = "/Users/benab/Desktop/Projekt/Auftragsdaten.parquet"  # ggf. anpassen
+SCORE_COLS = ["Entfernungsscore", "Zuverlaessigkeit_Score"]
 
 
-@st.cache_data
-def get_geo_strukturen():
-    auftrag_geo, plz_coords, tree = build_auftrag_geo_from_df(AUFTRAGSDATEN_PATH)
-    return auftrag_geo, plz_coords, tree
+def google_maps_url(Handwerker_Name: str, PLZ_HW: str, Land: str) -> str:
+    q = f"{Handwerker_Name} {PLZ_HW} {Land}"
+    return "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(q)
+
+
+def _normalize_weights(weights: dict) -> dict:
+    s = float(sum(weights.values()))
+    if s == 0:
+        return {k: 0.0 for k in weights}
+    return {k: float(v) / s for k, v in weights.items()}
 
 
 def main():
     st.title("Handwerker-Dashboard")
 
-    st.markdown(
-        "Wähle eine **Schadensart** und optional einen **Falltyp**. "
-        "Alle Daten stammen aus vorgesplitteten Parquet-Dateien."
-    )
-
+    # -------------------- Filterbereich (wie im Original: dynamisch) --------------------
     col1, col2, col3, col4 = st.columns(4)
 
-    #Umkreisauswahl (neue v) in Spalte 1
     with col1:
         use_umkreis = st.checkbox("Umkreissuche", value=False)
+        # wie im Original: editierbar (nicht disabled)
         radius_km = st.number_input(
             "Radius (km)",
             min_value=1.0,
-            max_value=200.0,
-            value=30.0,
+            max_value=1000.0,
+            value=20.0,
             step=5.0,
-            disabled=not use_umkreis,
         )
-    #PLZ spalte 2
-    with col2:
-        plz_input = st.text_input(
-            "PLZ",
-            label_visibility="collapsed",
-            placeholder="PLZ eingeben",
-        )
-        country = st.selectbox(
-        "Land",
-        options=["DE", "AT", "CH"],
-        index=0,
-        label_visibility="visible",
-    )
 
-    #Schadensart
-    schadensarten = list_schadensarten()
-    schadensarten = [""] + schadensarten  # leere Auswahl
+    with col2:
+        plz_input = st.text_input("PLZ", label_visibility="collapsed", placeholder="PLZ eingeben")
+        country = st.selectbox("Land", options=["DE", "AT", "CH"], index=0, label_visibility="visible")
 
     with col3:
-        schadensart_input = st.selectbox(
-            "Schadenart",
-            schadensarten,
-            label_visibility="collapsed",
-            format_func=lambda x: "Schadenart auswählen" if x == "" else x,
+        filter_mode = st.radio(
+            "Filtermodus",
+            options=["Gewerk", "Schadenart/Falltyp"],
+            horizontal=True,
+            key="filter_mode",
         )
 
-    # Falltypen
-    if schadensart_input:
-        falltypen = list_falltypen_for_schadensart(schadensart_input)
+    # Defaults
+    gewerk_input = ""
+    schadensart_input = ""
+    falltyp_input = "Alle"
+
+    # Wichtig: Das bleibt wie im Original dynamisch beim Umschalten
+    if filter_mode == "Gewerk":
+        gewerke = [""] + list_gewerke()
+        with col3:
+            gewerk_input = st.selectbox(
+                "Gewerk",
+                gewerke,
+                format_func=lambda x: "Gewerk auswählen" if x == "" else x,
+                key="gewerk_input",
+            )
+
+        with col4:
+            st.selectbox("Falltyp", ["(Filtermodus: Gewerk)"], disabled=True, key="falltyp_disabled")
+
     else:
-        falltypen = []
+        schadensarten = [""] + list_schadensarten()
+        with col3:
+            schadensart_input = st.selectbox(
+                "Schadenart",
+                schadensarten,
+                format_func=lambda x: "Schadenart auswählen" if x == "" else x,
+                key="schadensart_input",
+            )
 
-    falltypen = ["", "Alle"] + falltypen
+        if schadensart_input:
+            falltypen_list = list_falltypen_for_schadensart(schadensart_input)
+        else:
+            falltypen_list = []
 
-    with col4:
-        falltyp_input = st.selectbox(
-            "Falltyp",
-            falltypen,
-            label_visibility="collapsed",
-            format_func=lambda x: "Falltyp auswählen" if x == "" else x,
+        falltypen = ["", "Alle"] + falltypen_list
+        with col4:
+            falltyp_input = st.selectbox(
+                "Falltyp",
+                falltypen,
+                format_func=lambda x: "Falltyp auswählen" if x == "" else x,
+                key="falltyp_input",
+            )
+
+    st.markdown("---")
+
+    # -------------------- Gewichtung oben (nicht Sidebar) --------------------
+    st.subheader("Gewichtung der Scores (0 erlaubt)")
+
+    w1, w2 = st.columns(2)
+    default_w = 0.5
+
+    with w1:
+        w_entf = st.slider(
+            "Entfernung",
+            min_value=0.0,
+            max_value=1.0,
+            value=default_w,
+            step=0.05,
+            key="weight_Entfernungsscore",
+        )
+    with w2:
+        w_zuv = st.slider(
+            "Zuverlässigkeit",
+            min_value=0.0,
+            max_value=1.0,
+            value=default_w,
+            step=0.05,
+            key="weight_Zuverlaessigkeit_Score",
+        )
+
+    weights_raw = {"Entfernungsscore": w_entf, "Zuverlaessigkeit_Score": w_zuv}
+    weights_norm = _normalize_weights(weights_raw)
+
+    if sum(weights_raw.values()) == 0:
+        st.caption("Gewichte (normalisiert): **alle 0** → Gesamtscore = 0")
+    else:
+        st.caption(
+            "Gewichte (normalisiert): "
+            + ", ".join([f"{k}: **{weights_norm[k]:.2f}**" for k in SCORE_COLS])
         )
 
     st.markdown("---")
 
-    #Suchen button maybe noch rausnehmen?
+    # -------------------- Suche / Berechnung --------------------
     if st.button("Suchen"):
-        if schadensart_input == "":
-            st.warning("Bitte zuerst eine Schadenart wählen.")
+        if plz_input == "":
+            st.warning("Bitte zuerst eine PLZ eingeben.")
             return
 
-        #Daten laden (kleine Datei je nach Schadenart/Falltyp)
-        try:
+        if filter_mode == "Gewerk":
+            if gewerk_input == "":
+                st.warning("Bitte zuerst ein Gewerk wählen.")
+                return
+            df_raw = lade_subset_auftragsdaten_gewerk(gewerk_input)
+        else:
+            if schadensart_input == "":
+                st.warning("Bitte zuerst eine Schadenart wählen.")
+                return
             df_raw = lade_subset_auftragsdaten(schadensart_input, falltyp_input)
-        except FileNotFoundError:
-            st.error("Für diese Auswahl existiert keine Datei.")
-            return
 
         if df_raw.empty:
-            st.warning("Keine Daten für diese Auswahl vorhanden.")
+            st.warning("Keine Handwerker für diese Auswahl vorhanden.")
             return
 
-        #Basis-Dashboard: 1 Zeile je Handwerker + PLZ
-        dashboard = (
-            df_raw[["Handwerker_Name", "PLZ_HW"]]
-            .drop_duplicates()
-            .reset_index(drop=True)
-        )
+        dashboard = df_raw[["Handwerker_Name", "PLZ_HW", "Land"]].drop_duplicates().reset_index(drop=True)
 
-        #Zuverlässigkeitsscore berechnen und anhängen
-        #ergänzung der berechnung muss noch
         df_zuv = berechne_zuverlaessigkeit(df_raw)
         dashboard = dashboard.merge(df_zuv, on="Handwerker_Name", how="left")
-        
-        #Umkreissuche oder einfache PLZ-Filterung
-        #einfache PLZ Filterung maybe durch einfache Liste ersetzen
+
         if use_umkreis:
-            if not plz_input:
-                st.warning("Bitte für die Umkreissuche eine PLZ eingeben.")
-                return
-
             with st.spinner("Berechne Umkreis..."):
-                # Geo-Strukturen nur aus den Handwerkern im Dashboard bauen
-                auftrag_geo, plz_coords, tree = build_auftrag_geo_from_df(dashboard)
-
+                auftrag_geo, plz_coords, tree = get_geo_strukturen()
                 geo_result = datensaetze_im_umkreis(
                     input_plz=plz_input.strip(),
                     radius_km=radius_km,
@@ -142,41 +184,122 @@ def main():
                 st.warning("Keine Handwerker im gewünschten Umkreis gefunden.")
                 return
 
-            #Entfernungen/Score ins Dashboard mergen
             geo_small = geo_result[["Handwerker_Name", "Entfernung_km", "Entfernungsscore"]]
             dashboard = dashboard.merge(geo_small, on="Handwerker_Name", how="inner")
+            dashboard["Entfernungsscore"] = pd.to_numeric(dashboard["Entfernungsscore"], errors="coerce")
+            dashboard["Entfernung_km"] = pd.to_numeric(dashboard["Entfernung_km"], errors="coerce")
 
         else:
-            #klassische PLZ-Filterung (optional)
-            if plz_input:
-                dashboard = dashboard[
-                    dashboard["PLZ_HW"].astype(str).str.startswith(plz_input.strip())
-                ]
+            # PLZ-Prefix Filter (wie original)
+            dashboard = dashboard[dashboard["PLZ_HW"].astype(str).str.startswith(plz_input.strip())]
+            # Stabil: Distanz-Spalten existieren trotzdem
+            dashboard["Entfernung_km"] = pd.NA
+            dashboard["Entfernungsscore"] = 0.0
 
         if dashboard.empty:
             st.warning("Keine Ergebnisse gefunden.")
             return
 
-        dashboard["Gesamtscore"] = 0.5* dashboard["Entfernungsscore"]+0.5* dashboard["Zuverlaessigkeit_Score"]
-        dashboard = dashboard.sort_values(by="Gesamtscore", ascending=False)
-        #Anzeigen lassen
+        # Score-Spalten absichern
+        for sc in SCORE_COLS:
+            if sc not in dashboard.columns:
+                dashboard[sc] = 0.0
+
+        # Gesamtscore
+        if sum(weights_raw.values()) == 0:
+            dashboard["Gesamtscore"] = 0.0
+        else:
+            dashboard["Gesamtscore"] = 0.0
+            for sc, w in weights_norm.items():
+                dashboard["Gesamtscore"] += dashboard[sc].fillna(0) * w
+
+        dashboard = dashboard.sort_values(by="Gesamtscore", ascending=False).reset_index(drop=True)
+
+        dashboard["Maps-Link"] = dashboard.apply(
+            lambda r: google_maps_url(
+                str(r.get("Handwerker_Name", "")),
+                str(r.get("PLZ_HW", "")),
+                str(r.get("Land", "")),
+            ),
+            axis=1,
+        )
+
+        # -------------------- Übersicht --------------------
+        st.subheader("Übersicht")
+
+        if filter_mode == "Gewerk":
+            filter_text = f"**Filtermodus:** Gewerk · **Gewerk:** {gewerk_input}"
+        else:
+            ft = falltyp_input if falltyp_input else "—"
+            filter_text = f"**Filtermodus:** Schadenart/Falltyp · **Schadenart:** {schadensart_input} · **Falltyp:** {ft}"
+
+        filter_text += f" · **PLZ:** {plz_input} · **Land:** {country}"
+        filter_text += f" · **Umkreis:** {radius_km:.0f} km" if use_umkreis else " · **Umkreis:** nein"
+        st.markdown(filter_text)
+
+        if sum(weights_raw.values()) == 0:
+            st.caption("**Gewichte (normalisiert):** alle 0 → Gesamtscore = 0")
+        else:
+            st.caption(
+                "**Gewichte (normalisiert):** "
+                + ", ".join([f"{k}: **{weights_norm[k]:.2f}**" for k in SCORE_COLS])
+            )
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("Ergebnisse", f"{len(dashboard):,}".replace(",", "."))
+        with k2:
+            st.metric("Ø Gesamtscore", f"{dashboard['Gesamtscore'].fillna(0).mean():.2f}")
+        with k3:
+            st.metric("Ø Zuverlässigkeit", f"{dashboard['Zuverlaessigkeit_Score'].fillna(0).mean():.2f}")
+        with k4:
+            if use_umkreis:
+                avg_km = dashboard["Entfernung_km"].dropna()
+                st.metric("Ø Entfernung (km)", f"{avg_km.mean():.1f}" if len(avg_km) else "—")
+            else:
+                st.metric("Ø Entfernung (km)", "—")
+
+        st.divider()
+
+        # -------------------- Anzeige (Progress Bars) --------------------
         st.subheader("Handwerkervorschläge")
 
         shown_cols = [
             "Handwerker_Name",
             "PLZ_HW",
+            "Land",
             "Zuverlaessigkeit_Score",
-            "Entfernung_km",               # nur vorhanden bei Umkreissuche
-            "Entfernungsscore",            # nur vorhanden bei Umkreissuche
-            "Gesamtscore"
+            "Entfernung_km",
+            "Entfernungsscore",
+            "Gesamtscore",
+            "Maps-Link",
         ]
-
         available_cols = [c for c in shown_cols if c in dashboard.columns]
+
+        column_config = {
+            "Maps-Link": st.column_config.LinkColumn("Maps-Link", display_text="Öffnen in Google Maps"),
+        }
+        if "Zuverlaessigkeit_Score" in available_cols:
+            column_config["Zuverlaessigkeit_Score"] = st.column_config.ProgressColumn(
+                "Zuverlässigkeit", min_value=0.0, max_value=1.0, format="%.2f"
+            )
+        if "Entfernungsscore" in available_cols:
+            column_config["Entfernungsscore"] = st.column_config.ProgressColumn(
+                "Entfernungsscore", min_value=0.0, max_value=1.0, format="%.2f"
+            )
+        if "Gesamtscore" in available_cols:
+            column_config["Gesamtscore"] = st.column_config.ProgressColumn(
+                "Gesamtscore", min_value=0.0, max_value=1.0, format="%.2f"
+            )
 
         st.dataframe(
             dashboard[available_cols],
             use_container_width=True,
             height=600,
+            hide_index=True,
+            column_config=column_config,
         )
+
+
 if __name__ == "__main__":
     main()

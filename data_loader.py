@@ -1,11 +1,32 @@
 import streamlit as st
-import polars as pl
-
+import pandas as pd
 
 @st.cache_data
-def load_Auftragsdaten():
-    return pl.read_parquet("/Users/benab/Desktop/Projekt/Auftragsdaten.parquet").to_pandas()
+def load_Auftragsdaten() -> pd.DataFrame:
+    df = pd.read_parquet("/Users/benab/Desktop/Projekt/Auftragsdaten.parquet")
+
+    df["PLZ_HW"] = df["PLZ_HW"].astype(str).str.replace(r"\D", "", regex=True).replace("", pd.NA)
+
+    df = df.dropna(subset=["PLZ_HW"])
+    
+    dh_land_map = {
+    1: "DE",
+    2: "AT",
+    4: "CH"
+    }
+
+    df["Land"] = df["Land"].replace("-", pd.NA).fillna(df["DH_ID"].map(dh_land_map))
+
+
+    df = df[~df["Handwerker_Name"].str.contains(r"vonovia|eigenleistung|sachcontrol|(leer)", case=False, na=False)]
+    
+    # df = df[df["Handwerker_Name"].str.contains(r"Amazon", case=False, na=False)]
+
+    df = df[(df["Forderung_Netto"] >= 0) & (df["Einigung_Netto"] >= 0)]
+    df = df[~((df["Forderung_Netto"] >= 1000) & (df["Einigung_Netto"] >= 2 * df["Forderung_Netto"]))]
+    
+    return df
 
 @st.cache_data
 def load_Positionsdaten():
-    return pl.read_parquet("/Users/benab/Desktop/Projekt/Positionsdaten.parquet").to_pandas()
+    return pd.read_parquet("/Users/benab/Desktop/Projekt/Positionsdaten.parquet")
