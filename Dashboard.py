@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from Zuverlässigkeit import berechne_zuverlaessigkeit
+from Wilsonzuverlässigkeit import berechne_zuverlaessigkeit_variante_b
 from Auftrags_und_Positionsdaten import (
     list_schadensarten,
     list_falltypen_for_schadensart,
@@ -165,8 +165,8 @@ def main():
 
         dashboard = df_raw[["Handwerker_Name", "PLZ_HW", "Land"]].drop_duplicates().reset_index(drop=True)
 
-        df_zuv = berechne_zuverlaessigkeit(df_raw)
-        dashboard = dashboard.merge(df_zuv, on="Handwerker_Name", how="left")
+        df_zuv = berechne_zuverlaessigkeit_variante_b(df_raw)
+        dashboard = dashboard.merge(df_zuv[["Handwerker_Name", "Zuverlaessigkeit_Score"]], on="Handwerker_Name", how="left")
 
         if use_umkreis:
             with st.spinner("Berechne Umkreis..."):
@@ -194,8 +194,8 @@ def main():
             dashboard = dashboard[dashboard["Land"] == country]
             dashboard = dashboard[dashboard["PLZ_HW"].astype(str).str.startswith(plz_input.strip())]
             # Stabil: Distanz-Spalten existieren trotzdem
-            dashboard["Entfernung_km"] = pd.NA
-            dashboard["Entfernungsscore"] = 0.0
+            dashboard["Entfernung_km"] = 0.0
+            dashboard["Entfernungsscore"] = 1.0
 
         if dashboard.empty:
             st.warning("Keine Ergebnisse gefunden.")
@@ -215,6 +215,9 @@ def main():
                 dashboard["Gesamtscore"] += dashboard[sc].fillna(0) * w
 
         dashboard = dashboard.sort_values(by="Gesamtscore", ascending=False).reset_index(drop=True)
+        for col in ["Zuverlaessigkeit_Score", "Entfernung_km", "Entfernungsscore", "Gesamtscore"]:
+            if col in dashboard.columns:
+                dashboard[col] = pd.to_numeric(dashboard[col], errors="coerce").round(2)
 
         dashboard["Maps-Link"] = dashboard.apply(
             lambda r: google_maps_url(
@@ -258,7 +261,7 @@ def main():
                 avg_km = dashboard["Entfernung_km"].dropna()
                 st.metric("Ø Entfernung (km)", f"{avg_km.mean():.1f}" if len(avg_km) else "—")
             else:
-                st.metric("Ø Entfernung (km)", "—")
+                st.metric("Ø Entfernung (km)", "0.00")
 
         st.divider()
 
@@ -282,7 +285,7 @@ def main():
         }
         if "Zuverlaessigkeit_Score" in available_cols:
             column_config["Zuverlaessigkeit_Score"] = st.column_config.ProgressColumn(
-                "Zuverlässigkeit", min_value=0.0, max_value=1.0, format="%.2f"
+                "Preiszuverlässigkeitsscore", min_value=0.0, max_value=1.0, format="%.2f"
             )
         if "Entfernungsscore" in available_cols:
             column_config["Entfernungsscore"] = st.column_config.ProgressColumn(
@@ -300,7 +303,19 @@ def main():
             hide_index=True,
             column_config=column_config,
         )
+        if len(dashboard) > 0:
+            with st.expander("Erklärung zur Score-Zusammensetzung"):
+                st.markdown("""
+                Der dargestellte **Gesamtscore** setzt sich aus mehreren gewichteten Teilkomponenten zusammen.
+                In diesem Dashboard werden insbesondere der **Entfernungsscore** und der **Zuverlässigkeitsscore**
+                berücksichtigt.
 
+                - **Zuverlässigkeitsscore:** spiegelt die Verlässlichkeit basierend auf den vorhandenen Auftrags-/Positionsdaten wider.
+                - **Entfernungsscore:** bewertet die räumliche Nähe (bei Umkreissuche anhand der Distanz; ohne Umkreissuche als Standardwert).
+
+                Die Teilwerte werden anschließend gemäß der oben eingestellten **Gewichtung** normalisiert und zu einem
+                einheitlichen Gesamtscore zusammengeführt. So entsteht eine objektive und vergleichbare Reihenfolge der Vorschläge.
+                """)
 
 if __name__ == "__main__":
     main()

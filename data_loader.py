@@ -6,22 +6,17 @@ def load_Auftragsdaten() -> pd.DataFrame:
     df = pd.read_parquet("/Users/benab/Desktop/Projekt/Auftragsdaten.parquet")
 
     df["PLZ_HW"] = df["PLZ_HW"].astype(str).str.replace(r"\D", "", regex=True).replace("", pd.NA)
-
     df = df.dropna(subset=["PLZ_HW"])
     
-    dh_land_map = {
-    1: "DE",
-    2: "AT",
-    4: "CH"
-    }
-
+    dh_land_map = {1: "DE", 2: "AT", 4: "CH"}
     df["Land"] = df["Land"].replace("-", pd.NA).fillna(df["DH_ID"].map(dh_land_map))
 
-
     df = df[~df["Handwerker_Name"].str.contains(r"vonovia|eigenleistung|sachcontrol|(leer)", case=False, na=False)]
-    
-    # df = df[df["Handwerker_Name"].str.contains(r"Amazon", case=False, na=False)]
 
+    df["Gewerk_Name"] = df["Gewerk_Name"].replace("(leer)", "Sonstiges")
+    df["Schadenart_Name"] = df["Schadenart_Name"].replace({"Betriebsunterbrechnung": "Betriebsunterbrechung", "-": "Sonstiges"})
+    df["Falltyp_Name"] = df["Falltyp_Name"].replace("-", "Sonstiges")
+    
     df = df[(df["Forderung_Netto"] >= 0) & (df["Einigung_Netto"] >= 0)]
     df = df[~((df["Forderung_Netto"] >= 1000) & (df["Einigung_Netto"] >= 2 * df["Forderung_Netto"]))]
     

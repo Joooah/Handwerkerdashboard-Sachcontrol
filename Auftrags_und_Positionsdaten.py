@@ -43,8 +43,11 @@ def generate_parquet_files() -> None:
     for (schadenart, falltyp), grp in merged.groupby(["Schadenart_Name", "Falltyp_Name"]):
         safe_s = make_safe(schadenart)
         safe_f = make_safe(falltyp)
-        
-        pfad = os.path.join(ORDNER_FALLTYP, f"{safe_s}_{safe_f}.parquet")
+
+        ordner_s = os.path.join(ORDNER_FALLTYP, safe_s)
+        os.makedirs(ordner_s, exist_ok=True)
+
+        pfad = os.path.join(ordner_s, f"{safe_f}.parquet")
         grp.to_parquet(pfad, index=False)
         
 def lade_subset_auftragsdaten_gewerk(gewerk_name: str):
@@ -75,7 +78,8 @@ def lade_subset_auftragsdaten(schadenart: str, falltyp: str | None = None):
         pfad = os.path.join(ORDNER_SCHADENSFALL, f"{safe_s}.parquet")
     else:
         safe_f = make_safe(falltyp)
-        pfad = os.path.join(ORDNER_FALLTYP, f"{safe_s}_{safe_f}.parquet")
+        pfad = os.path.join(ORDNER_FALLTYP, safe_s, f"{safe_f}.parquet")
+
 
     df = pd.read_parquet(pfad)
 
@@ -85,35 +89,69 @@ def lade_subset_auftragsdaten(schadenart: str, falltyp: str | None = None):
 
     return df[vorhandene].copy()
 
+def read_first_value_from_parquet(pfad: str, possible_cols: list[str]):
+    df = pd.read_parquet(pfad)
+    
+
+    for c in possible_cols:
+        if c in df.columns and len(df) > 0:
+            v = df[c].iloc[0]
+            if pd.notna(v):
+                return str(v)
+    return None
+
 def list_gewerke():
     if not os.path.isdir(ORDNER_GEWERK):
         return []
-    return sorted(
-        fname[:-8]
-        for fname in os.listdir(ORDNER_GEWERK)
-        if fname.endswith(".parquet")
-    )
+
+    result = set()
+    for fname in os.listdir(ORDNER_GEWERK):
+        if not fname.endswith(".parquet"):
+            continue
+
+        pfad = os.path.join(ORDNER_GEWERK, fname)
+        val = read_first_value_from_parquet(pfad, ["gewerk", "Gewerk_Name"])
+        if val:
+            result.add(val)
+
+    return sorted(result)
+
 
 
 def list_schadensarten():
-    if not os.path.isdir(ORDNER_SCHADENSFALL):
+
+    result = set()
+    for fname in os.listdir(ORDNER_SCHADENSFALL):
+        if not fname.endswith(".parquet"):
+            continue
+
+        pfad = os.path.join(ORDNER_SCHADENSFALL, fname)
+
+        val = read_first_value_from_parquet(pfad, ["schadenart_name", "Schadenart_Name"])
+        if val:
+            result.add(val)
+
+    return sorted(result)
+
+
+def list_falltypen_for_schadensart(schadensart: str):
+    safe_s = make_safe(schadensart)
+    ordner_s = os.path.join(ORDNER_FALLTYP, safe_s)
+
+    if not os.path.isdir(ordner_s):
         return []
-    
-    return sorted(fname[:-8] for fname in os.listdir(ORDNER_SCHADENSFALL)if fname.endswith(".parquet"))
 
+    result = set()
+    for fname in os.listdir(ordner_s):
+        if not fname.endswith(".parquet"):
+            continue
 
-def list_falltypen_for_schadensart(schadenart: str):
-    safe_s = make_safe(schadenart)
-    prefix = f"{safe_s}_"
-    result = []
-
-    if not os.path.isdir(ORDNER_FALLTYP):
-        return []
-
-    for fname in os.listdir(ORDNER_FALLTYP):
-        if fname.startswith(prefix) and fname.endswith(".parquet"):
-            falltyp = fname[len(prefix):-8]
-            result.append(falltyp)
+        pfad = os.path.join(ordner_s, fname)
+        val = read_first_value_from_parquet(pfad, ["falltyp_name", "Falltyp_Name"])
+        if val:
+            result.add(val)
+        else:
+            result.add(fname[:-8])  # fallback: Dateiname ohne .parquet
 
     return sorted(result)
 

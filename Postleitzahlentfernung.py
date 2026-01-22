@@ -79,9 +79,9 @@ def datensaetze_im_umkreis(input_plz: str, radius_km: float, country: str, auftr
 
     if not result.empty:
         coords_target = np.radians(result[["latitude", "longitude"]].to_numpy())
-        coord0_rad = coord0  # das ist ja schon np.radians([[lat0, lon0]])
+        coord0_rad = coord0 
 
-        dists_rad = haversine_distances(coord0_rad, coords_target)[0]  # shape (n,)
+        dists_rad = haversine_distances(coord0_rad, coords_target)[0]
         dists_km = dists_rad * 6371.0
         result = result.copy()
         result["Entfernung_km"] = dists_km
