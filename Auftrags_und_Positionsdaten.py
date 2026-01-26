@@ -1,160 +1,94 @@
-import os
-import re
+import re, json
+from pathlib import Path
 import pandas as pd
-
+import streamlit as st
 from data_loader import load_Auftragsdaten, load_Positionsdaten
 
-BASIS_ORDNER = "/Users/benab/Desktop/Projekt"
-ORDNER_GEWERK = os.path.join(BASIS_ORDNER, "Auftrags_und_Positionsdaten_Gewerk")
-ORDNER_SCHADENSFALL = os.path.join(BASIS_ORDNER, "Auftrags_und_Positionsdaten_Schadensfall")
-ORDNER_FALLTYP = os.path.join(BASIS_ORDNER, "Auftrags_und_Positionsdaten_Falltypen")
+BASIS_ORDNER = Path("/Users/benab/Desktop/Projekt")
+ORDNER_GEWERK = BASIS_ORDNER / "Auftrags_und_Positionsdaten_Gewerk"
+ORDNER_SCHADENSFALL = BASIS_ORDNER / "Auftrags_und_Positionsdaten_Schadensfall"
+ORDNER_FALLTYP = BASIS_ORDNER / "Auftrags_und_Positionsdaten_Falltypen"
+INDEX_FILE = BASIS_ORDNER / "index_lists.json"
 
+SAFE_RE = re.compile(r'[\/\\\?\*\:\|\<\>"]')
+RELEVANTE_SPALTEN = [
+    "Handwerker_Name", "PLZ_HW", "Land",
+    "Gewerk_Name", "Schadenart_Name", "Falltyp_Name",
+    "Einigung_Netto", "Forderung_Netto",
+]
 
-def make_safe(value: object) -> str:
-    s = str(value)
-    s = re.sub(r'[\/\\\?\*\:\|\<\>"]', "_", s)
-    return s.strip()
+def make_safe(x) -> str:
+    return SAFE_RE.sub("_", str(x)).strip()
 
+def load_index() -> dict:
+    return json.loads(INDEX_FILE.read_text("utf-8")) if INDEX_FILE.exists() else \
+        {"gewerke": [], "schadensarten": [], "falltypen_by_schadensart": {}}
+
+def write_index(gewerke, schadensarten, falltypen_map) -> None:
+    INDEX_FILE.write_text(json.dumps({
+        "gewerke": sorted(set(gewerke)),
+        "schadensarten": sorted(set(schadensarten)),
+        "falltypen_by_schadensart": {k: sorted(set(v)) for k, v in falltypen_map.items()},
+    }, ensure_ascii=False, indent=2), "utf-8")
+
+def subset(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in RELEVANTE_SPALTEN if c in df.columns]
+    return df[cols].copy()
 
 def generate_parquet_files() -> None:
-    os.makedirs(ORDNER_GEWERK, exist_ok=True)
-    os.makedirs(ORDNER_SCHADENSFALL, exist_ok=True)
-    os.makedirs(ORDNER_FALLTYP, exist_ok=True)
+    for d in (ORDNER_GEWERK, ORDNER_SCHADENSFALL, ORDNER_FALLTYP):
+        d.mkdir(parents=True, exist_ok=True)
 
-    df_auftrag = load_Auftragsdaten()
-    df_pos = load_Positionsdaten()
+    auftrag, pos = load_Auftragsdaten(), load_Positionsdaten()
+    drop_cols = [c for c in pos.columns if c in auftrag.columns and c != "KvaRechnung_ID"]
+    merged = auftrag.merge(pos.drop(columns=drop_cols), on="KvaRechnung_ID", how="left")
 
-    common_cols = [c for c in df_pos.columns if c in df_auftrag.columns and c != "KvaRechnung_ID"]
-
-    df_pos_clean = df_pos.drop(columns=common_cols)
-
-    merged = pd.merge(df_auftrag, df_pos_clean, on="KvaRechnung_ID", how="left")
-
-    for gewerk, grp in merged.groupby("Gewerk_Name"):
-        safe_g = make_safe(gewerk)
-        pfad = os.path.join(ORDNER_GEWERK, f"{safe_g}.parquet")
-        grp.to_parquet(pfad, index=False)
+    gewerke, schadensarten, falltypen_map = [], [], {}
     
-    for schadenart, grp in merged.groupby("Schadenart_Name"):
-        safe_s = make_safe(schadenart)
-        pfad = os.path.join(ORDNER_SCHADENSFALL, f"{safe_s}.parquet")
-        grp.to_parquet(pfad, index=False)
+    def dump_groups(group_cols, out_dir: Path, collect=None):
+        for key, grp in merged.groupby(group_cols):
+            if (isinstance(key, tuple) and any(pd.isna(k) for k in key)) or pd.isna(key):
+                continue
 
-    for (schadenart, falltyp), grp in merged.groupby(["Schadenart_Name", "Falltyp_Name"]):
-        safe_s = make_safe(schadenart)
-        safe_f = make_safe(falltyp)
+            if not isinstance(key, tuple):
+                grp.to_parquet(out_dir / f"{make_safe(key)}.parquet", index=False)
+                if collect is not None:
+                    collect.append(str(key))
+            else:
+                s, f = map(str, key)
+                falltypen_map.setdefault(s, []).append(f)
+                d = out_dir / make_safe(s)
+                d.mkdir(exist_ok=True)
+                grp.to_parquet(d / f"{make_safe(f)}.parquet", index=False)
 
-        ordner_s = os.path.join(ORDNER_FALLTYP, safe_s)
-        os.makedirs(ordner_s, exist_ok=True)
+    dump_groups("Gewerk_Name", ORDNER_GEWERK, gewerke)
+    dump_groups("Schadenart_Name", ORDNER_SCHADENSFALL, schadensarten)
+    dump_groups(["Schadenart_Name", "Falltyp_Name"], ORDNER_FALLTYP)
 
-        pfad = os.path.join(ordner_s, f"{safe_f}.parquet")
-        grp.to_parquet(pfad, index=False)
-        
-def lade_subset_auftragsdaten_gewerk(gewerk_name: str):
-    safe_g = make_safe(gewerk_name)
-    pfad = os.path.join(ORDNER_GEWERK, f"{safe_g}.parquet")
+    write_index(gewerke, schadensarten, falltypen_map)
 
-    df = pd.read_parquet(pfad)
+INDEX = load_index()
+GEWERKE_LISTE = INDEX["gewerke"]
+SCHADENSARTEN_LISTE = INDEX["schadensarten"]
+FALLTYPEN_BY_SCHADENSART = INDEX["falltypen_by_schadensart"]
 
-    relevante_spalten = [
-        "Handwerker_Name",
-        "PLZ_HW",
-        "Land",
-        "gewerk_name",
-        "Schadenart_Name",
-        "Falltyp_Name",
-        "Einigung_Netto",
-        "Forderung_Netto"
-    ]
+@st.cache_data
+def list_gewerke(): return GEWERKE_LISTE
 
-    vorhandene = [c for c in relevante_spalten if c in df.columns]
-    return df[vorhandene].copy()
+@st.cache_data
+def list_schadensarten(): return SCHADENSARTEN_LISTE
 
+@st.cache_data
+def list_falltypen_for_schadensart(s: str): return FALLTYPEN_BY_SCHADENSART.get(s, [])
 
-def lade_subset_auftragsdaten(schadenart: str, falltyp: str | None = None):
-    safe_s = make_safe(schadenart)
+def lade_subset_auftragsdaten_gewerk(gewerk: str) -> pd.DataFrame:
+    return subset(pd.read_parquet(ORDNER_GEWERK / f"{make_safe(gewerk)}.parquet"))
 
-    if not falltyp or falltyp == "Alle":
-        pfad = os.path.join(ORDNER_SCHADENSFALL, f"{safe_s}.parquet")
-    else:
-        safe_f = make_safe(falltyp)
-        pfad = os.path.join(ORDNER_FALLTYP, safe_s, f"{safe_f}.parquet")
-
-
-    df = pd.read_parquet(pfad)
-
-    relevante_spalten = ["Handwerker_Name", "PLZ_HW", "Land", "Schadenart_Name", "Falltyp_Name", "Einigung_Netto", "Forderung_Netto"]
-
-    vorhandene = [c for c in relevante_spalten if c in df.columns]
-
-    return df[vorhandene].copy()
-
-def read_first_value_from_parquet(pfad: str, possible_cols: list[str]):
-    df = pd.read_parquet(pfad)
-    
-
-    for c in possible_cols:
-        if c in df.columns and len(df) > 0:
-            v = df[c].iloc[0]
-            if pd.notna(v):
-                return str(v)
-    return None
-
-def list_gewerke():
-    if not os.path.isdir(ORDNER_GEWERK):
-        return []
-
-    result = set()
-    for fname in os.listdir(ORDNER_GEWERK):
-        if not fname.endswith(".parquet"):
-            continue
-
-        pfad = os.path.join(ORDNER_GEWERK, fname)
-        val = read_first_value_from_parquet(pfad, ["gewerk", "Gewerk_Name"])
-        if val:
-            result.add(val)
-
-    return sorted(result)
-
-
-
-def list_schadensarten():
-
-    result = set()
-    for fname in os.listdir(ORDNER_SCHADENSFALL):
-        if not fname.endswith(".parquet"):
-            continue
-
-        pfad = os.path.join(ORDNER_SCHADENSFALL, fname)
-
-        val = read_first_value_from_parquet(pfad, ["schadenart_name", "Schadenart_Name"])
-        if val:
-            result.add(val)
-
-    return sorted(result)
-
-
-def list_falltypen_for_schadensart(schadensart: str):
-    safe_s = make_safe(schadensart)
-    ordner_s = os.path.join(ORDNER_FALLTYP, safe_s)
-
-    if not os.path.isdir(ordner_s):
-        return []
-
-    result = set()
-    for fname in os.listdir(ordner_s):
-        if not fname.endswith(".parquet"):
-            continue
-
-        pfad = os.path.join(ordner_s, fname)
-        val = read_first_value_from_parquet(pfad, ["falltyp_name", "Falltyp_Name"])
-        if val:
-            result.add(val)
-        else:
-            result.add(fname[:-8])  # fallback: Dateiname ohne .parquet
-
-    return sorted(result)
-
+def lade_subset_auftragsdaten(schaden: str, falltyp: str | None = None) -> pd.DataFrame:
+    s = make_safe(schaden)
+    p = (ORDNER_SCHADENSFALL / f"{s}.parquet") if (not falltyp or falltyp == "Alle") \
+        else (ORDNER_FALLTYP / s / f"{make_safe(falltyp)}.parquet")
+    return subset(pd.read_parquet(p))
 
 if __name__ == "__main__":
     generate_parquet_files()

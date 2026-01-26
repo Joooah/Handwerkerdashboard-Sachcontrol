@@ -1,96 +1,109 @@
 import pandas as pd
 import numpy as np
 import pgeocode
+import joblib
+from pathlib import Path
 from sklearn.neighbors import BallTree
 import streamlit as st
 from sklearn.metrics.pairwise import haversine_distances
 from data_loader import load_Auftragsdaten
 
+ZFILL = {"DE": 5, "AT": 4, "CH": 4}
+R_EARTH_KM = 6371.0
+
+@st.cache_resource
+def nomi(country: str) -> pgeocode.Nominatim:
+    return pgeocode.Nominatim(country)
+
 @st.cache_data
 def build_plz_koordinaten() -> pd.DataFrame:
-    countries = ["DE", "AT", "CH"]
     frames = []
 
-    for c in countries:
-        nomi = pgeocode.Nominatim(c)
-        df_country = nomi._data.copy()
-
-        df_country["country_code"] = c
-        df_country["postal_code"] = df_country["postal_code"].astype(str).str.strip()
-        if c == "DE":
-            df_country["postal_code"] = df_country["postal_code"].str.zfill(5)
-        else:  # AT/CH
-            df_country["postal_code"] = df_country["postal_code"].str.zfill(4)
-
-        df_country = df_country[["country_code","postal_code","latitude","longitude",]]
-
-        df_country = df_country.rename(columns={"postal_code": "PLZ_HW","country_code": "Land"})
-        
-        df_country = (df_country.dropna(subset=["latitude", "longitude"]).drop_duplicates(subset=["Land","PLZ_HW"], keep="first"))
-
-        frames.append(df_country)
-
-    df_dach = pd.concat(frames, ignore_index=True)
-    return df_dach
-
+    for c, z in ZFILL.items():
+        d = nomi(c)._data[["postal_code", "latitude", "longitude"]].copy()
+        d["Land"] = c
+        d["PLZ_HW"] = d["postal_code"].astype(str).str.strip().str.zfill(z)
+        frames.append(d[["Land", "PLZ_HW", "latitude", "longitude"]].dropna().drop_duplicates(["Land", "PLZ_HW"]))
+    return pd.concat(frames, ignore_index=True)
 
 @st.cache_resource
 def build_auftrag_geo_from_df(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, BallTree]:
     df = df.copy()
     df["Land"] = df["Land"].astype(str).str.strip().str.upper()
+    df["PLZ_HW"] = df["PLZ_HW"].astype(str).str.strip()
 
-    df["PLZ_HW"] = df.apply(lambda r: str(r["PLZ_HW"]).strip().zfill(5) if r["Land"] == "DE" else str(r["PLZ_HW"]).strip().zfill(4), axis=1)
-    df_dach = build_plz_koordinaten()
+    df["PLZ_HW"] = np.where(
+        df["Land"].eq("DE"),
+        df["PLZ_HW"].str.zfill(5),
+        df["PLZ_HW"].str.zfill(4),
+    )
 
-    auftrag = (df.groupby("Handwerker_Name", as_index=False).agg({"Land": "first", "PLZ_HW": "first"}))
-    auftrag_geo = auftrag.merge(df_dach, on=["Land", "PLZ_HW"], how="left")
+    dach = build_plz_koordinaten()
 
-    plz_coords = (df_dach[["Land", "PLZ_HW",  "latitude", "longitude"]].dropna().drop_duplicates(subset=["Land", "PLZ_HW"]).rename(columns={"latitude": "lat", "longitude": "lon"}).set_index(["Land", "PLZ_HW"]))
+    auftrag_geo = (
+        df.groupby("Handwerker_Name", as_index=False)[["Land", "PLZ_HW"]].first()
+          .merge(dach, on=["Land", "PLZ_HW"], how="left")
+    )
 
-    coords_rad = np.radians(plz_coords[["lat", "lon"]].to_numpy())
-    tree = BallTree(coords_rad, metric="haversine")
+    plz_coords = (
+        dach.rename(columns={"latitude": "lat", "longitude": "lon"})
+           .set_index(["Land", "PLZ_HW"])[["lat", "lon"]]
+    )
 
+    tree = BallTree(np.radians(plz_coords.to_numpy()), metric="haversine")
     return auftrag_geo, plz_coords, tree
 
 @st.cache_resource
 def get_geo_strukturen():
-    df = load_Auftragsdaten()
+    cache_dir = Path(".geo_cache")
+    cache_dir.mkdir(exist_ok=True)
 
-    return build_auftrag_geo_from_df(df)
+    f_auftrag = cache_dir / "auftrag_geo.parquet"
+    f_plz     = cache_dir / "plz_coords.parquet"
+    f_tree    = cache_dir / "tree.joblib"
+    
+    if f_auftrag.exists() and f_plz.exists() and f_tree.exists():
+        auftrag_geo = pd.read_parquet(f_auftrag)
 
-def datensaetze_im_umkreis(input_plz: str, radius_km: float, country: str, auftrag_geo: pd.DataFrame, plz_coords: pd.DataFrame,tree: BallTree,) -> pd.DataFrame:
+        plz_coords_df = pd.read_parquet(f_plz)
+        plz_coords = plz_coords_df.set_index(["Land", "PLZ_HW"])[["lat", "lon"]]
 
-    nomi = pgeocode.Nominatim(country)
-    info = nomi.query_postal_code(input_plz)
+        tree = joblib.load(f_tree)
+        return auftrag_geo, plz_coords, tree
 
+    auftrag_geo, plz_coords, tree = build_auftrag_geo_from_df(load_Auftragsdaten())
+
+    auftrag_geo.to_parquet(f_auftrag, index=False)
+    plz_coords.reset_index().to_parquet(f_plz, index=False)  # Index flach speichern
+    joblib.dump(tree, f_tree)
+
+    return auftrag_geo, plz_coords, tree
+
+def datensaetze_im_umkreis(input_plz: str, radius_km: float, country: str, auftrag_geo: pd.DataFrame, plz_coords: pd.DataFrame,tree: BallTree) -> pd.DataFrame:
+
+    info = nomi(country).query_postal_code(input_plz)
     if pd.isna(info.latitude) or pd.isna(info.longitude):
         raise ValueError(f"PLZ {input_plz} nicht gefunden (Land: {country})")
 
-    lat0, lon0 = info.latitude, info.longitude
+    coord0 = np.radians([[info.latitude, info.longitude]])
+    idx = tree.query_radius(coord0, r=radius_km / R_EARTH_KM)[0]
 
-    coord0 = np.radians([[lat0, lon0]])
-    radius = radius_km / 6371.0
-
-    idx = tree.query_radius(coord0, r=radius)[0]
-    nearby = plz_coords.iloc[idx].reset_index()
-    nearby_pairs = nearby[["Land", "PLZ_HW"]].drop_duplicates()
-
+    nearby_pairs = plz_coords.iloc[idx].reset_index()[["Land", "PLZ_HW"]].drop_duplicates()
     result = auftrag_geo.merge(nearby_pairs, on=["Land", "PLZ_HW"], how="inner")
 
-    if not result.empty:
-        coords_target = np.radians(result[["latitude", "longitude"]].to_numpy())
-        coord0_rad = coord0 
+    if result.empty:
+        return result
 
-        dists_rad = haversine_distances(coord0_rad, coords_target)[0]
-        dists_km = dists_rad * 6371.0
-        result = result.copy()
-        result["Entfernung_km"] = dists_km
-        
-        result = result.sort_values("Entfernung_km")
-        
-        labels = ["1.0","0.8","0.6","0.4","0.2","0.0"]
-        bins = [0,5,20,40,60,80,1001]
-        result["Entfernungsscore"] = pd.cut(result["Entfernung_km"], right=True,labels = labels, bins=bins, include_lowest=True)
-
+    d_km = haversine_distances(coord0, np.radians(result[["latitude", "longitude"]].to_numpy()))[0] * R_EARTH_KM
+    result = result.assign(
+        **{
+            "Entfernung in km": d_km,
+            "Entfernungsscore": pd.cut(
+                d_km, bins=[0, 5, 20, 40, 60, 80, 101],
+                labels=["100", "80", "60", "40", "20", "0"],
+                include_lowest=True,
+            )
+        }
+    ).sort_values("Entfernung in km")
 
     return result
