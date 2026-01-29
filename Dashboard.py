@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 from urllib.parse import quote
+from GooglePlaces import load_cache, get_handwerker_data, CACHE_FILE_PATH
 from Preiszuverlässigkeit import berechne_zuverlaessigkeit
 from Auftrags_und_Positionsdaten import (
     list_schadensarten, list_falltypen_for_schadensart, lade_subset_auftragsdaten,
     list_gewerke, lade_subset_auftragsdaten_gewerk,
 )
-from Postleitzahlentfernung import datensaetze_im_umkreis, get_geo_strukturen
+from Postleitzahlentfernung import datensaetze_im_umkreis, get_geo_strukturen, nomi, ZFILL
 
 st.set_page_config(page_title="SOLERA Dashboard", layout="wide")
 
@@ -30,6 +31,8 @@ def pick_df(filter_mode, gewerk, schaden, falltyp):
 
 
 def main():
+    if "google_cache" not in st.session_state:
+        st.session_state.google_cache = load_cache()
     h1, h2 = st.columns([4,2], vertical_alignment="bottom")
     with h1:
         st.markdown("<div style='height:100%; display:flex; align-items:flex-end;'>"
@@ -37,7 +40,7 @@ def main():
                 "</div>", unsafe_allow_html=True)
 
     with h2:
-        st.image("/Users/benab/Desktop/Projekt/Download.png", width='stretch')
+        st.image("/Users/benab/Desktop/Projekt/Solera.png", width='stretch')
 
     st.markdown("<div class='top-divider'></div>", unsafe_allow_html=True)
 
@@ -175,9 +178,9 @@ def main():
     with st.expander("Gewichtung der Scores", expanded=False):
         w1, w2 = st.columns(2, gap="large")
         with w1:
-            w_entf = st.number_input("Entfernung", 0.0, 1.0, 0.5, 0.05)
+            w_entf = st.number_input("Entfernung", 0.0, 1.01, 0.5, 0.05)
         with w2:
-            w_zuv = st.number_input("Zuverlässigkeit", 0.0, 1.0, 0.5, 0.05)
+            w_zuv = st.number_input("Zuverlässigkeit", 0.0, 1.01, 0.5, 0.05)
 
         w_raw = {"Entfernungsscore": w_entf, "Preiszuverlässigkeitsscore": w_zuv}
         w = norm_weights(w_raw)
@@ -193,72 +196,138 @@ def main():
         do_search = st.button("Suchen", type="primary", use_container_width=True)
 
     st.divider()
+    
+    if do_search:
+        # Nur beim aktiven Klick auf "Suchen" validieren & neu berechnen
+        if not plz_input:
+            st.warning("Bitte zuerst eine PLZ eingeben.")
+            return
 
-    if not do_search:
-        return
-    if not plz_input:
-        st.warning("Bitte zuerst eine PLZ eingeben.")
-        return
+        plz_input = plz_input.replace(" ", "")
+        if not plz_input.isdigit():
+            st.warning("Bitte gültige PLZ eingeben.")
+            return
+
+        ziel_len = ZFILL.get(country, 5)
+        if len(plz_input) != ziel_len:
+            st.warning("Bitte gültige PLZ eingeben.")
+            return
+
+        info = nomi(country).query_postal_code(plz_input)
+        if pd.isna(info.latitude) or pd.isna(info.longitude):
+            st.warning("Bitte gültige PLZ eingeben.")
+            return
+        
+        df_raw = pick_df(filter_mode, gewerk_input, schadensart_input, falltyp_input)
+        if df_raw is None:
+            st.warning("Bitte zuerst einen gültigen Filter auswählen.")
+            return
+
+        # Such-Kontext merken (damit bei Checkbox-Rerun die Anzeige stabil bleibt)
+        st.session_state.search_ctx = {
+            "filter_mode": filter_mode,
+            "gewerk_input": gewerk_input,
+            "schadensart_input": schadensart_input,
+            "falltyp_input": falltyp_input,
+            "plz_input": plz_input,
+            "country": country,
+            "use_umkreis": use_umkreis,
+            "radius_km": radius_km,
+            "w_raw": w_raw,   # optional: falls du später Gewichtung/Anzeige stabil halten willst
+            "w": w,
+        }
+    
+    else:
+        # Kein neuer Suchklick (z.B. Checkbox wurde geklickt):
+        # Wenn wir bereits ein Ergebnis haben, zeigen wir es wieder.
+        if "dashboard_result" not in st.session_state or "search_ctx" not in st.session_state:
+            return  # es gab noch nie eine Suche -> nichts anzeigen
+
+        # Kontext wiederherstellen, damit die UI-Ausgabe (Filtertext etc.) konsistent bleibt
+        ctx = st.session_state.search_ctx
+        filter_mode = ctx["filter_mode"]
+        gewerk_input = ctx["gewerk_input"]
+        schadensart_input = ctx["schadensart_input"]
+        falltyp_input = ctx["falltyp_input"]
+        plz_input = ctx["plz_input"]
+        country = ctx["country"]
+        use_umkreis = ctx["use_umkreis"]
+        radius_km = ctx["radius_km"]
+        w_raw = ctx["w_raw"]
+        w = ctx["w"]
+
+    # Dashboard-Result laden und danach NICHT mehr neu berechnen
+        dashboard = st.session_state.dashboard_result.copy()
+    
+    
 
     df_raw = pick_df(filter_mode, gewerk_input, schadensart_input, falltyp_input)
     if df_raw is None:
         st.warning("Bitte zuerst einen gültigen Filter auswählen.")
         return
 
+    if do_search:
+        dashboard = df_raw[["Handwerker_Name", "PLZ_HW", "Land"]].drop_duplicates().reset_index(drop=True)
+        dashboard = dashboard.merge(
+            berechne_zuverlaessigkeit(df_raw)[["Handwerker_Name", "Preiszuverlässigkeitsscore"]],
+            on="Handwerker_Name", how="left")
     
-    dashboard = df_raw[["Handwerker_Name", "PLZ_HW", "Land"]].drop_duplicates().reset_index(drop=True)
-    dashboard = dashboard.merge(
-        berechne_zuverlaessigkeit(df_raw)[["Handwerker_Name", "Preiszuverlässigkeitsscore"]],
-        on="Handwerker_Name", how="left")
-    
-    if use_umkreis:
-        with st.spinner("Berechne Umkreis..."):
-            auftrag_geo, plz_coords, tree = st.session_state.geo_struct
-            relevante_hw = set(dashboard["Handwerker_Name"].unique())
-            auftrag_geo_sub = auftrag_geo[auftrag_geo["Handwerker_Name"].isin(relevante_hw)]
-            geo_result = datensaetze_im_umkreis(
+        if use_umkreis:
+            with st.spinner("Berechne Umkreis..."):
+                auftrag_geo, plz_coords, tree = st.session_state.geo_struct
+                relevante_hw = set(dashboard["Handwerker_Name"].unique())
+                auftrag_geo_sub = auftrag_geo[auftrag_geo["Handwerker_Name"].isin(relevante_hw)]
+                
+            try:
+                geo_result = datensaetze_im_umkreis(
                 plz_input,
                 radius_km,
                 country,
                 auftrag_geo_sub,
                 plz_coords,
                 tree,
-            )
+                )
+            except ValueError:
+                st.warning(f"Bitte gültige PLZ eingeben.")
+                st.stop()
+            
+            if geo_result.empty:
+                st.warning("Keine Handwerker im gewünschten Umkreis gefunden.")
+                return
 
-        if geo_result.empty:
-            st.warning("Keine Handwerker im gewünschten Umkreis gefunden.")
+            geo = geo_result[["Handwerker_Name", "Land", "PLZ_HW", "Entfernung in km", "Entfernungsscore"]]
+            dashboard = dashboard.merge(geo, on=["Handwerker_Name", "Land", "PLZ_HW"], how="inner")
+            dashboard[["Entfernung in km", "Entfernungsscore"]] = dashboard[["Entfernung in km", "Entfernungsscore"]].apply(pd.to_numeric, errors="coerce")
+
+        else:
+            dashboard = dashboard[(dashboard["Land"] == country) & (dashboard["PLZ_HW"].astype(str).str.startswith(plz_input))]
+            dashboard = dashboard.assign(**{"Entfernung in km": 0.0, "Entfernungsscore": 100.0})
+
+        if dashboard.empty:
+            st.warning("Keine Ergebnisse gefunden.")
             return
 
-        geo = geo_result[["Handwerker_Name", "Land", "PLZ_HW", "Entfernung in km", "Entfernungsscore"]]
-        dashboard = dashboard.merge(geo, on=["Handwerker_Name", "Land", "PLZ_HW"], how="inner")
-        dashboard[["Entfernung in km", "Entfernungsscore"]] = dashboard[["Entfernung in km", "Entfernungsscore"]].apply(pd.to_numeric, errors="coerce")
-
-    else:
-        dashboard = dashboard[(dashboard["Land"] == country) & (dashboard["PLZ_HW"].astype(str).str.startswith(plz_input))]
-        dashboard = dashboard.assign(**{"Entfernung in km": 0.0, "Entfernungsscore": 100.0})
-
-    if dashboard.empty:
-        st.warning("Keine Ergebnisse gefunden.")
-        return
-
-    for c in SCORE_COLS:
-        if c not in dashboard: dashboard[c] = 0.0
+        for c in SCORE_COLS:
+            if c not in dashboard: dashboard[c] = 0.0
 
 
-    if sum(w_raw.values()) == 0:
-        dashboard["Gesamtscore"] = 0.0
-    else:
-        dashboard["Gesamtscore"] = sum(dashboard[c].fillna(0) * w[c] for c in SCORE_COLS)
+        if sum(w_raw.values()) == 0:
+            dashboard["Gesamtscore"] = 0.0
+        else:
+            dashboard["Gesamtscore"] = sum(dashboard[c].fillna(0) * w[c] for c in SCORE_COLS)
 
-    num_cols = ["Preiszuverlässigkeitsscore", "Entfernung in km", "Entfernungsscore", "Gesamtscore"]
-    for c in num_cols:
-        if c in dashboard: dashboard[c] = pd.to_numeric(dashboard[c], errors="coerce").round(2)
-    dashboard = dashboard.sort_values("Gesamtscore", ascending=False).reset_index(drop=True)
+        num_cols = ["Preiszuverlässigkeitsscore", "Entfernung in km", "Entfernungsscore", "Gesamtscore"]
+        for c in num_cols:
+            if c in dashboard: dashboard[c] = pd.to_numeric(dashboard[c], errors="coerce").round(2)
+        dashboard = dashboard.sort_values("Gesamtscore", ascending=False).reset_index(drop=True)
 
-    dashboard["Maps-Link"] = (
-        "https://www.google.com/maps/search/?api=1&query=" +
-        (dashboard["Handwerker_Name"].astype(str) + " " + dashboard["PLZ_HW"].astype(str) + " " + dashboard["Land"].astype(str)).map(quote)
-    )
+        dashboard["Maps-Link"] = (
+            "https://www.google.com/maps/search/?api=1&query=" +
+            (dashboard["Handwerker_Name"].astype(str) + " " + dashboard["PLZ_HW"].astype(str) + " " + dashboard["Land"].astype(str)).map(quote)
+        )
+        
+    if do_search:
+        st.session_state.dashboard_result = dashboard.copy()
 
     st.subheader("Übersicht")
     ft = falltyp_input if (filter_mode != "Gewerk" and falltyp_input) else "—"
@@ -280,19 +349,78 @@ def main():
     st.divider()
     
     st.subheader("Handwerkervorschläge")
+    
+    # Google Reviews aus Cache vorbelegen
+    df_cache = st.session_state.google_cache
 
-    dashboard["Entfernung in km (txt)"] = dashboard["Entfernung in km"].map(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+    # WICHTIG: last_updated kommt aus CSV und kann String / NaT / Timestamp sein.
+    # Für Vergleiche MUSS die Spalte explizit in datetime konvertiert werden.
+    df_cache["last_updated"] = pd.to_datetime(
+        df_cache["last_updated"],
+        errors="coerce",
+        utc=True
+    )
 
-    shown_cols = ["Handwerker_Name", "PLZ_HW", "Land", "Entfernung in km (txt)",
-            "Entfernungsscore", "Preiszuverlässigkeitsscore", "Gesamtscore", "Maps-Link"]
+    cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=30)
+    cache_ok = df_cache[
+        (df_cache["last_updated"].isna() | (df_cache["last_updated"] >= cutoff))
+    ].copy()
+
+    cache_ok["key"] = (
+        cache_ok["name_original"].astype(str).str.lower().str.strip() + "|" +
+        cache_ok["plz"].astype(str) + "|" +
+        cache_ok["country"].astype(str)
+    )
+
+    cache_ok = (
+        cache_ok
+        .sort_values("last_updated")
+        .drop_duplicates(subset="key", keep="last")
+    )
+
+    cache_map = cache_ok.set_index("key")[["rating", "user_ratings_total"]].to_dict("index")
+
+    def fmt_review(row):
+        key = f"{str(row['Handwerker_Name']).lower().strip()}|{str(row['PLZ_HW'])}|{str(row['Land'])}"
+
+        if key not in cache_map:
+            return "Noch nicht abgefragt"
+        
+        r = cache_map[key].get("rating")
+        n = cache_map[key].get("user_ratings_total")
+
+        if r is None and key in cache_map:
+            return "Im Cache (keine Reviews vorhanden)"
+
+        if pd.isna(r) or r is None:
+            return "Keine Bewertung"
+        
+        if pd.isna(n) or n is None:
+            return f"{float(r):.1f}"
+        
+        return f"{float(r):.1f} ({int(n)})"
+
+    dashboard["Google Reviews"] = dashboard.apply(fmt_review, axis=1)
+
+    
+    # Checkbox nur aktiv, wenn noch nicht abgefragt
+    #dashboard["Google Reviews laden"] = dashboard["Google Reviews"] == "Noch nicht abgefragt"
+
+    if "Google Reviews laden" not in dashboard.columns:
+        dashboard["Google Reviews laden"] = False
+
+    shown_cols = ["Handwerker_Name", "PLZ_HW", "Land", "Entfernung in km",
+            "Entfernungsscore", "Preiszuverlässigkeitsscore", "Gesamtscore", "Maps-Link", "Google Reviews", "Google Reviews laden"]
     cols = [c for c in shown_cols if c in dashboard.columns]
 
     column_config = {
             "Handwerker_Name": st.column_config.TextColumn("Handwerker"),
             "PLZ_HW": st.column_config.TextColumn("PLZ"),
             "Land": st.column_config.TextColumn("Land"),
-            "Entfernung in km (txt)": st.column_config.TextColumn("Entfernung in km"),
+            "Entfernung in km": st.column_config.NumberColumn("Entfernung in km"),
             "Maps-Link": st.column_config.LinkColumn("Maps-Link", display_text="In Google Maps öffnen"),
+            "Google Reviews": st.column_config.TextColumn("Google Reviews"),
+            "Google Reviews laden": st.column_config.CheckboxColumn("Google Reviews laden"),
     }
     for k, title in [("Preiszuverlässigkeitsscore","Preiszuverlässigkeitsscore"),
                      ("Entfernungsscore","Entfernungsscore"),
@@ -300,19 +428,76 @@ def main():
         if k in cols:
             column_config[k] = st.column_config.ProgressColumn(label=title, min_value=0.0, max_value=100.0, format="%.0f%%")
 
-    st.dataframe(dashboard[cols], use_container_width=True, height=600, 
-                     hide_index=True, column_config=column_config)
+    def on_hw_table_change():
+        """
+        Wird bei jeder Änderung im data_editor aufgerufen (Checkbox-Klick).
+        Wir lesen den Editor-State aus st.session_state["hw_table"] (dict) aus
+        und laden für neu angehakte Zeilen die Google Reviews.
+        """
+        state = st.session_state.get("hw_table")
+        if not isinstance(state, dict):
+            return
+
+        edited_rows = state.get("edited_rows", {})
+        if not edited_rows:
+            return
+
+        df_cache_local = st.session_state.google_cache
+
+        # "edited_rows" ist ein dict: {row_index: {"Spaltenname": neuerWert, ...}, ...}
+        # Wir reagieren nur auf Änderungen an der Checkbox-Spalte.
+        for row_idx, changes in edited_rows.items():
+            if changes.get("Google Reviews laden") is True:
+                # Die Zeile aus der aktuell angezeigten Tabelle holen:
+                row = st.session_state.hw_table_df.iloc[int(row_idx)]
+
+                try:
+                    _, df_cache_local = get_handwerker_data(
+                        name=row["Handwerker_Name"],
+                        plz=row["PLZ_HW"],
+                        country=row["Land"],
+                        df_cache=df_cache_local
+                    )
+                except Exception as e:
+                    # WICHTIG: nicht schlucken, sonst sieht man nie Key/Budget-Probleme
+                    st.session_state.last_google_error = str(e)
+                finally:
+                    # Checkbox wieder aus (sonst löst jeder Rerun erneut aus)
+                    st.session_state.hw_table_df.at[int(row_idx), "Google Reviews laden"] = False
+
+        st.session_state.google_cache = df_cache_local
+
+    st.session_state.hw_table_df = dashboard[cols].copy()
+
+    edited = st.data_editor(
+        #dashboard[cols], 
+        st.session_state.hw_table_df,
+        use_container_width=True, 
+        height=600, 
+        hide_index=True, 
+        column_config=column_config,
+        disabled=[c for c in cols if c!= "Google Reviews laden"],
+        key="hw_table",
+        on_change=on_hw_table_change,
+    )
+    
+    if "last_google_error" in st.session_state:
+        st.error(f"Google Places Fehler: {st.session_state.last_google_error}")
+        del st.session_state["last_google_error"]
+    
+    #st.dataframe(dashboard[cols], use_container_width=True, height=600, 
+    #                 hide_index=True, column_config=column_config)
     if len(dashboard):
         with st.expander("Erklärung zur Score-Zusammensetzung"):
             st.markdown("""
 
-            Der dargestellte Gesamtscore setzt sich aus den beiden Teilkomponenten Entfernungsscore und Preiszuverlässigkeitsscore zusammen.
+    Der dargestellte Gesamtscore setzt sich aus den beiden Teilkomponenten Entfernungsscore und Preiszuverlässigkeitsscore zusammen.
 
-            Der Preiszuverlässigkeitsscore bewertet die Verlässlichkeit eines Handwerkers sowohl aus Preissicht als auch aus auftragsbezogener Sicht. Dabei wird berücksichtigt, wie angemessen die abgegebenen Kostenvoranschläge waren und wie häufig der Handwerker von Kunden beauftragt wurde. Grundlage hierfür bilden die vorhandenen Auftrags- und Positionsdaten.
-            Der Entfernungsscore bewertet die räumliche Nähe des Handwerkers zum jeweiligen Schadensort und klassifiziert diese in definierte Entdernungskategorien.
+    Der Preiszuverlässigkeitsscore bewertet die Verlässlichkeit eines Handwerkers sowohl aus Preissicht als auch aus auftragsbezogener Sicht. Dabei wird berücksichtigt, wie angemessen die abgegebenen Kostenvoranschläge waren und wie häufig der Handwerker von Kunden beauftragt wurde. Grundlage hierfür bilden die vorhandenen Auftrags- und Positionsdaten.<br>
+    Der Entfernungsscore bewertet die räumliche Nähe des Handwerkers zum jeweiligen Schadensort und klassifiziert diese in definierte Entdernungskategorien.
 
-            Die beiden Teilwerte werden standardmäßig gleichgewichtet (50:50) oder abhängig von der eingestellten Gewichtung kombiniert und zu einem
-            einheitlichen Gesamtscore zusammengeführt.
+    Die beiden Teilwerte werden standardmäßig gleichgewichtet (50:50) oder abhängig von der eingestellten Gewichtung kombiniert und zu einem
+    einheitlichen Gesamtscore zusammengeführt.
             """)
 
 if __name__ == "__main__":
